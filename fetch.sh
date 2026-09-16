@@ -42,6 +42,12 @@ EXCLUDE_URLS=(
 
 COMMON_JSON="repository,number,title,author,url,updatedAt,isDraft"
 
+# How stale a PICKED-UP PR (one I reviewed but was never requested on) may be
+# before it drops off the queue. Requested PRs -- direct or team -- are never
+# aged out: someone is actively waiting on those, however long they have waited.
+# Without this the reviewed-by query dredges up spec PRs I commented on in 2017.
+PICKED_MAX_AGE_DAYS="${PICKED_MAX_AGE_DAYS:-30}"
+
 # Hard ceiling on every gh call. A laptop sleep or VPN drop leaves the TCP socket
 # half-open: gh has no read timeout of its own, so it blocks forever and stalls
 # the whole watch loop (launchd's KeepAlive can't help — the process is alive,
@@ -127,6 +133,14 @@ gh_json() {
   done
 }
 
+MY_LOGIN="$(gh_json '' api user --jq '.login')"
+# No login means auth or the network is down; a blank would silently mangle the
+# "is this mine?" filters later, so fail the cycle and let the watcher retry.
+if [ -z "$MY_LOGIN" ]; then
+  echo "[$(date '+%H:%M:%S')] [warn] could not resolve gh login; leaving dashboard.html untouched" >&2
+  exit 1
+fi
+
 echo "[$(date '+%H:%M:%S')] fetching..." >&2
 
 # Every search goes through here so the burst stays paced. The fallback is `null`
@@ -140,17 +154,18 @@ search_prs() {
 # failed_search <value> -- true when the search degraded rather than returned.
 failed_search() { [ "$1" = "null" ] || [ -z "$1" ]; }
 
-# cached_search <cache-key> <search args...>
+# cached_search <cache-key> <fetcher-fn> <args...>
 # Echoes fresh results (refreshing the cache) and returns 0. On failure, echoes
 # the last good result for this query and returns 1; echoes `null` and returns 1
 # when there is no usable cache. Callers use `if out="$(cached_search ...)"` so
 # the non-zero return does not trip `set -e`.
 cached_search() {
   local key="$1"; shift
+  local fetcher="$1"; shift
   local file="$CACHE_DIR/$key.json"
   local streakfile="$CACHE_DIR/$key.empty"
   local out age streak cached_len
-  out="$(search_prs "$@")"
+  out="$("$fetcher" "$@")"
 
   # -- hard failure (403 / timeout / non-JSON): fall back to the cache ---------
   if failed_search "$out"; then
@@ -190,6 +205,48 @@ cached_search() {
   return 0
 }
 
+# search_reviewed_gql -- the reviewed-by:@me query, over GraphQL rather than
+# `gh search prs`, so each hit arrives carrying MY OWN review state and the
+# repo's archived flag. REST search cannot return either, and finding them out
+# afterwards would cost one `gh pr view` per hit -- 67 calls a cycle to learn
+# that 54 of them are ones I already approved and do not want to see. One call
+# answers it for the whole list, and the rows are shaped to match the REST
+# search output exactly so nothing downstream can tell the difference.
+#
+# myReviewState is my LATEST submitted review, except that an unsubmitted
+# (PENDING) review wins outright: a draft review in progress is the single
+# strongest signal that a PR is still mine to finish.
+search_reviewed_gql() {
+  local raw
+  raw="$(gh_json 'null' api graphql \
+    -f login="$MY_LOGIN" \
+    -f q="is:pr is:open reviewed-by:$MY_LOGIN" \
+    -f query='
+      query($q: String!, $login: String!) {
+        search(query: $q, type: ISSUE, first: 100) {
+          nodes { ... on PullRequest {
+            number title url updatedAt isDraft
+            author { login }
+            repository { nameWithOwner isArchived }
+            reviews(author: $login, last: 20) { nodes { state } }
+          } }
+        }
+      }')"
+  sleep "$SEARCH_DELAY"
+  if failed_search "$raw"; then printf 'null'; return 0; fi
+  jq -c '
+    [ .data.search.nodes[] | select(.url != null) | {
+        repository: { nameWithOwner: .repository.nameWithOwner },
+        number, title, url, updatedAt, isDraft,
+        author: { login: .author.login },
+        archived: .repository.isArchived,
+        myReviewState:
+          ( ( .reviews.nodes // [] | map(.state) ) as $st
+            | if ($st | index("PENDING")) then "PENDING"
+              else ( $st | last // "NONE" ) end )
+      } ]' <<<"$raw" 2>/dev/null || printf 'null'
+}
+
 # Per-cycle health: queries served from cache vs. ones with no data at all.
 STALE_QUERIES=0
 FAILED_QUERIES=0
@@ -214,7 +271,7 @@ classify_query() {
 # --- 1. review requested directly of me --------------------------------------
 DIRECT_FAILED=false
 DIRECT_STALE=false
-if DIRECT="$(cached_search direct --review-requested=@me --state=open --limit 100 \
+if DIRECT="$(cached_search direct search_prs --review-requested=@me --state=open --limit 100 \
   --json "$COMMON_JSON")"; then :; else
   if failed_search "$DIRECT"; then DIRECT_FAILED=true; else DIRECT_STALE=true; fi
   classify_query "$DIRECT"; DIRECT="$CQ_RESULT"
@@ -228,7 +285,7 @@ fi
 # it uses the core API, which has budget to spare.
 AUTHORED_FAILED=false
 AUTHORED_STALE=false
-if AUTHORED="$(cached_search authored --author=@me --state=open --limit 50 \
+if AUTHORED="$(cached_search authored search_prs --author=@me --state=open --limit 50 \
   --json repository,number)"; then :; else
   if failed_search "$AUTHORED"; then AUTHORED_FAILED=true; else AUTHORED_STALE=true; fi
   classify_query "$AUTHORED"; AUTHORED="$CQ_RESULT"
@@ -245,8 +302,7 @@ fi
 # carries the stack view, so it should not be the call that degrades.
 REVIEWED_FAILED=false
 REVIEWED_STALE=false
-if REVIEWED="$(cached_search reviewed --reviewed-by=@me --state=open --limit 100 \
-  --json "$COMMON_JSON")"; then :; else
+if REVIEWED="$(cached_search reviewed search_reviewed_gql)"; then :; else
   if failed_search "$REVIEWED"; then REVIEWED_FAILED=true; else REVIEWED_STALE=true; fi
   classify_query "$REVIEWED"; REVIEWED="$CQ_RESULT"
 fi
@@ -257,36 +313,73 @@ fi
 # other and the direct list) happens client-side in the HTML, keyed on url.
 TEAMPRS='[]'
 for t in "${TEAMS[@]}"; do
-  if one="$(cached_search "team-${t//\//_}" --state=open --limit 100 \
+  if one="$(cached_search "team-${t//\//_}" search_prs --state=open --limit 100 \
     --json "$COMMON_JSON" "team-review-requested:$t")"; then :; else
     classify_query "$one"; one="$CQ_RESULT"
   fi
   TEAMPRS="$(jq -s '.[0] + .[1]' <(echo "$TEAMPRS") <(echo "$one"))"
 done
 
-# --- 2a. manual opt-out (the only hard drop) ---------------------------------
-# The queue deliberately shows EVERY PR I'm a reviewer on. It used to hard-drop
-# drafts and archived-repo PRs and collapse the ones another reviewer had already
-# sent back; all three are now surfaced as badges instead (computed in 2b) so the
-# triage signal survives without anything disappearing from the list.
+# --- 2a. what the queue drops ------------------------------------------------
+# The queue answers one question: what is waiting on ME right now. Four hard
+# drops, and the order matters less than the scope -- note which ones apply to
+# the picked-up list only:
+#
+#   1. EXCLUDE_URLS        hand-maintained, exact URL, permanent.
+#   2. drafts              a draft is not asking to be reviewed yet. (All sources.)
+#   3. I already approved  picked-up rows only. My review is in; if the author
+#                          wants another pass they re-request me, and that
+#                          arrives through the DIRECT search, which rule 3 does
+#                          not touch. This is what 54 of 63 rows were.
+#   4. older than PICKED_MAX_AGE_DAYS   picked-up rows only.
+#
+# Rules 3 and 4 are deliberately scoped to the reviewed-by list. A direct or
+# team request is a live ask from a person: it is never dropped for being old,
+# and never for being approved, because a re-request is exactly how someone
+# says "look again". Everything NOT listed above is still badged rather than
+# filtered -- archived repos and PRs sitting with the author stay visible.
 DROP_URLS="$(printf '%s\n' "${EXCLUDE_URLS[@]+"${EXCLUDE_URLS[@]}"}" \
   | jq -R 'select(length > 0)' | jq -s '.')"
 
-filter_queue() {
+drop_excluded() {
   jq --argjson drop "$DROP_URLS" \
     '[ .[] | select( .url as $u | $drop | index($u) | not ) ]'
 }
-DIRECT="$(filter_queue <<<"$DIRECT")"
-TEAMPRS="$(filter_queue <<<"$TEAMPRS")"
-REVIEWED="$(filter_queue <<<"$REVIEWED")"
+DIRECT="$(drop_excluded <<<"$DIRECT")"
+TEAMPRS="$(drop_excluded <<<"$TEAMPRS")"
+REVIEWED="$(drop_excluded <<<"$REVIEWED")"
 
-MY_LOGIN="$(gh_json '' api user --jq '.login')"
-# No login means auth or the network is down; a blank would silently mangle the
-# "is this mine?" filters below, so fail the cycle and let the watcher retry.
-if [ -z "$MY_LOGIN" ]; then
-  echo "[$(date '+%H:%M:%S')] [warn] could not resolve gh login; leaving dashboard.html untouched" >&2
-  exit 1
-fi
+# My own PRs are not review work, and every source can return them: reviewed-by
+# matches a comment on my own PR, and a team request lands on me when I open a
+# PR against a team I am in. Drop them from all three here rather than at render
+# time, so the tallies below and the log line count the same rows the page does
+# -- they did not, and a queue count that disagrees with the queue is exactly
+# the kind of small lie that makes the whole page untrustworthy.
+drop_mine() { jq --arg me "$MY_LOGIN" '[ .[] | select(.author.login != $me) ]'; }
+DIRECT="$(drop_mine <<<"$DIRECT")"
+TEAMPRS="$(drop_mine <<<"$TEAMPRS")"
+REVIEWED="$(drop_mine <<<"$REVIEWED")"
+
+# Rules 3 and 4, plus the tallies the page reports. A row that is both approved
+# and ancient counts once, as approved: it is the more useful reason of the two.
+CUTOFF="$(date -u -v-"${PICKED_MAX_AGE_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ')"
+HIDDEN_APPROVED="$(jq '[ .[] | select(.myReviewState == "APPROVED") ] | length' <<<"$REVIEWED")"
+HIDDEN_AGED="$(jq --arg c "$CUTOFF" \
+  '[ .[] | select(.myReviewState != "APPROVED") | select(.updatedAt < $c) ] | length' <<<"$REVIEWED")"
+REVIEWED="$(jq --arg c "$CUTOFF" \
+  '[ .[] | select(.myReviewState != "APPROVED") | select(.updatedAt >= $c) ]' <<<"$REVIEWED")"
+
+# Rule 2. Counted on the de-duped union so a PR requested of me AND of my team
+# is one hidden draft, not two.
+HIDDEN_DRAFTS="$(jq -s 'add | unique_by(.url) | [ .[] | select(.isDraft) ] | length' \
+  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED"))"
+drop_drafts() { jq '[ .[] | select(.isDraft | not) ]'; }
+DIRECT="$(drop_drafts <<<"$DIRECT")"
+TEAMPRS="$(drop_drafts <<<"$TEAMPRS")"
+REVIEWED="$(drop_drafts <<<"$REVIEWED")"
+
+echo "[$(date '+%H:%M:%S')] [info] queue: $(jq -s 'add|unique_by(.url)|length' \
+  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED")) shown; hidden ${HIDDEN_APPROVED} approved, ${HIDDEN_AGED} aged out, ${HIDDEN_DRAFTS} draft" >&2
 
 # --- 2b. enrich review-queue PRs with triage badges --------------------------
 # Everything computed here is DISPLAY metadata — none of it removes a PR from the
@@ -374,11 +467,17 @@ FETCH_ERRORS="$(jq -n \
   --argjson staleQueries "$STALE_QUERIES" \
   --argjson failedQueries "$FAILED_QUERIES" \
   --argjson dropped "$AUTHORED_DROPPED" \
+  --argjson hidApproved "$HIDDEN_APPROVED" \
+  --argjson hidAged "$HIDDEN_AGED" \
+  --argjson hidDrafts "$HIDDEN_DRAFTS" \
+  --argjson agedDays "$PICKED_MAX_AGE_DAYS" \
   '{authored: $authored, authoredStale: $authoredStale,
     direct: $direct, directStale: $directStale,
     reviewed: $reviewed, reviewedStale: $reviewedStale,
     staleQueries: $staleQueries, failedQueries: $failedQueries,
-    authoredDropped: $dropped}')"
+    authoredDropped: $dropped,
+    hidden: {approved: $hidApproved, aged: $hidAged, drafts: $hidDrafts,
+             agedDays: $agedDays}}')"
 
 jq -n \
   --argjson direct "$DIRECT" \
@@ -392,12 +491,11 @@ jq -n \
   '{
      generatedAt: $now,
      me: $me,
-     # team PRs minus my own authored ones; dedupe of direct happens in JS
+     # Section 2a already dropped my own PRs from all three lists; these are
+     # belt-and-braces so a future edit there cannot silently double-list a PR
+     # in both columns. Dedupe across the three happens in JS, keyed on url.
      reviewTeam: ($teamprs | map(select(.author.login != $me))),
-     reviewDirect: $direct,
-     # reviewed-by:@me cannot return my own PRs (you cannot review your own), but
-     # filter anyway so a future qualifier change cannot double-list a PR in both
-     # columns -- the same guard reviewTeam carries, for the same reason.
+     reviewDirect: ($direct | map(select(.author.login != $me))),
      reviewReviewed: ($reviewed | map(select(.author.login != $me))),
      reviewMeta: $reviewMeta,
      authored: $authored,

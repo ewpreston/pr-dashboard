@@ -31,11 +31,7 @@ file on each interval; the page's `<meta refresh>` reloads it, so it stays curre
   possible time to lose one. Those rows carry a **picked up** badge, since nobody
   will re-route them to me if I forget.
   Merged and de-duped by URL, sorted **oldest-first** so the
-  longest-waiting PRs are at the top. **Nothing is filtered out**: drafts,
-  archived-repo PRs and PRs another reviewer has already sent back all appear,
-  each carrying a badge (`DRAFT`, `ARCHIVED REPO`, `with author`) rather than
-  being hidden. The single exception is the hand-maintained `EXCLUDE_URLS` array
-  at the top of `fetch.sh`.
+  longest-waiting PRs are at the top. See "What the queue hides" below.
 - **My open PRs** — my authored PRs with review decision (approved / changes
   requested / review required) and a rolled-up CI status, so I can see what's
   blocked on others vs. on me.
@@ -47,6 +43,53 @@ file on each interval; the page's `<meta refresh>` reloads it, so it stays curre
   `/code-review medium <pr-url>` to the clipboard to paste into a Claude session.
   Deliberately clipboard-only: a `file://` page can't run `claude`, and nothing
   should post to someone else's PR unattended.
+
+## What the queue hides
+
+The queue answers one question — *what is waiting on me right now* — so four
+things are dropped outright. Note which two apply to picked-up PRs only:
+
+| Dropped | Scope | Why |
+|---|---|---|
+| `EXCLUDE_URLS` | all | Hand-maintained exact URLs at the top of `fetch.sh`. Permanent. |
+| Drafts | all | A draft is not asking to be reviewed yet. |
+| **PRs I already approved** | picked-up only | My review is in. If the author wants another pass they re-request me, and that arrives through the *direct* search, which this rule does not touch. |
+| **Older than `PICKED_MAX_AGE_DAYS`** (30) | picked-up only | Otherwise `reviewed-by:@me` dredges up spec PRs commented on in 2017. |
+
+My own PRs are dropped from all three sources too — `reviewed-by:@me` matches a
+comment on my own PR, and a team request lands on me when I open a PR against a
+team I am in. They belong in the right-hand column, not the queue.
+
+The approved and age rules are scoped to the picked-up list on purpose. A direct
+or team request is a live ask from a person: it is never hidden for being old,
+and never for being approved, because **a re-request is exactly how someone says
+"look again"**.
+
+Everything else is still **badged rather than filtered** — archived repos and
+PRs sitting with the author stay in the list, because those are judgment calls
+rather than answered questions.
+
+A one-line receipt under the queue header says how many rows each rule removed
+(`54 already approved · 3 untouched for 30+ days hidden`), and the same line goes
+to `watch.log`. A count, never a list: it proves the filter is working without
+re-introducing what it removed. A queue whose length nobody can account for is
+how this went wrong in the first place.
+
+### Why this exists
+
+Adding the `reviewed-by:@me` source (so half-reviewed stacks stop vanishing)
+took the queue from 4 rows to **63**, of which 54 were already approved and the
+oldest was from 2017. It also made the enrichment loop issue one `gh pr view`
+per queue PR — 63 a cycle — pushing a cycle to ~250s against a 240s
+`CYCLE_TIMEOUT`. Filtering before enrichment fixed both: the queue is 6 rows and
+a cycle takes ~156s.
+
+`reviewed-by:@me` is therefore fetched over **GraphQL**, not `gh search prs`:
+each hit needs my own review state and the repo's archived flag, and REST search
+returns neither. Learning them afterwards would cost one call per hit — 67 calls
+to discover that 54 of them should be hidden. One GraphQL call answers it for
+the whole list, and `search_reviewed_gql` shapes the rows to match the REST
+search output exactly, so nothing downstream can tell which query it came from.
 
 ## How stacking is worked out
 
@@ -112,10 +155,10 @@ needs (see the section below):
 
 Keep `CYCLE_TIMEOUT` below `INTERVAL` so a killed cycle still finishes before the
 next one starts. Timeouts are logged to `watch.log` as `[warn]`. With
-`SEARCH_DELAY` at 8s a healthy cycle takes roughly 160s (it was ~150s before
-`reviewed-by:@me` added a 13th search), so the 240s ceiling still has room for a
-retry or two — but the margin is now one search thinner. Adding a 14th would be
-the point to re-measure rather than assume.
+`SEARCH_DELAY` at 8s a healthy cycle takes roughly 156s — 13 searches is ~104s
+of pure pacing, and the rest is the per-PR enrichment loop, which is why keeping
+the queue small matters to the cycle budget and not just to the eye. Adding a
+14th search would be the point to re-measure rather than assume.
 
 `SEARCH_DELAY` was raised from 5s to 8s because at 5s the 7th search in the burst
 (`blackboard-foundations/pd-team-daffy`, purely by position) 403'd three cycles
@@ -169,6 +212,12 @@ Note that running `./fetch.sh` by hand **while the LaunchAgent is also running**
 doubles the burst and will cause 403s that would not otherwise happen. Stop the
 agent first, or just read the dashboard the agent already writes.
 
+
+## Version control
+
+This directory is a git repo. `dashboard.html`, `.cache/` and `watch.log` are
+ignored; the scripts and this README are tracked, so any change here is
+revertable (`git log`, `git revert <sha>`). Commit before experimenting.
 
 ## Files
 - `fetch.sh` — queries GitHub, writes `dashboard.html`. Edit the `TEAMS` array
