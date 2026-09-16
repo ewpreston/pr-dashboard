@@ -40,6 +40,17 @@ EXCLUDE_URLS=(
   "https://github.com/1EdTech/lti-proposals/pull/20"
 )
 
+# PRs I have said my piece on and do not need back in the list. Distinct from
+# EXCLUDE_URLS above, and the difference is the whole reason it is a second
+# array: this drop applies to the PICKED-UP list only, so if someone actually
+# requests my review on one of these it returns to the queue. EXCLUDE_URLS is
+# "never, under any circumstances"; this is "not unless someone asks me".
+# Remove a line to unmute.
+MUTED_URLS=(
+  # Commented, neither approved nor requested changes, nothing left for me to do.
+  "https://github.com/blackboard-learn/learn/pull/9148"
+)
+
 COMMON_JSON="repository,number,title,author,url,updatedAt,isDraft"
 
 # How stale a PICKED-UP PR (one I reviewed but was never requested on) may be
@@ -327,6 +338,8 @@ done
 #
 #   1. EXCLUDE_URLS        hand-maintained, exact URL, permanent.
 #   2. drafts              a draft is not asking to be reviewed yet. (All sources.)
+#   2b. MUTED_URLS         picked-up only -- said my piece, do not need it back,
+#                          but a real review request still brings it in.
 #   3. I already approved  picked-up rows only. My review is in; if the author
 #                          wants another pass they re-request me, and that
 #                          arrives through the DIRECT search, which rule 3 does
@@ -360,6 +373,16 @@ DIRECT="$(drop_mine <<<"$DIRECT")"
 TEAMPRS="$(drop_mine <<<"$TEAMPRS")"
 REVIEWED="$(drop_mine <<<"$REVIEWED")"
 
+# Muted: hand-picked, picked-up rows only. Applied before the rules below so a
+# muted PR is reported as muted rather than swallowed by a broader reason -- the
+# deliberate choice is the more useful one to see in the tally.
+MUTE_URLS="$(printf '%s\n' "${MUTED_URLS[@]+"${MUTED_URLS[@]}"}" \
+  | jq -R 'select(length > 0)' | jq -s '.')"
+HIDDEN_MUTED="$(jq --argjson m "$MUTE_URLS" \
+  '[ .[] | select( .url as $u | $m | index($u) ) ] | length' <<<"$REVIEWED")"
+REVIEWED="$(jq --argjson m "$MUTE_URLS" \
+  '[ .[] | select( .url as $u | $m | index($u) | not ) ]' <<<"$REVIEWED")"
+
 # Rules 3 and 4, plus the tallies the page reports. A row that is both approved
 # and ancient counts once, as approved: it is the more useful reason of the two.
 CUTOFF="$(date -u -v-"${PICKED_MAX_AGE_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ')"
@@ -379,7 +402,7 @@ TEAMPRS="$(drop_drafts <<<"$TEAMPRS")"
 REVIEWED="$(drop_drafts <<<"$REVIEWED")"
 
 echo "[$(date '+%H:%M:%S')] [info] queue: $(jq -s 'add|unique_by(.url)|length' \
-  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED")) shown; hidden ${HIDDEN_APPROVED} approved, ${HIDDEN_AGED} aged out, ${HIDDEN_DRAFTS} draft" >&2
+  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED")) shown; hidden ${HIDDEN_APPROVED} approved, ${HIDDEN_AGED} aged out, ${HIDDEN_DRAFTS} draft, ${HIDDEN_MUTED} muted" >&2
 
 # --- 2b. enrich review-queue PRs with triage badges --------------------------
 # Everything computed here is DISPLAY metadata — none of it removes a PR from the
@@ -467,6 +490,7 @@ FETCH_ERRORS="$(jq -n \
   --argjson staleQueries "$STALE_QUERIES" \
   --argjson failedQueries "$FAILED_QUERIES" \
   --argjson dropped "$AUTHORED_DROPPED" \
+  --argjson hidMuted "$HIDDEN_MUTED" \
   --argjson hidApproved "$HIDDEN_APPROVED" \
   --argjson hidAged "$HIDDEN_AGED" \
   --argjson hidDrafts "$HIDDEN_DRAFTS" \
@@ -477,7 +501,7 @@ FETCH_ERRORS="$(jq -n \
     staleQueries: $staleQueries, failedQueries: $failedQueries,
     authoredDropped: $dropped,
     hidden: {approved: $hidApproved, aged: $hidAged, drafts: $hidDrafts,
-             agedDays: $agedDays}}')"
+             muted: $hidMuted, agedDays: $agedDays}}')"
 
 jq -n \
   --argjson direct "$DIRECT" \

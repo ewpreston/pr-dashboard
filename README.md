@@ -53,6 +53,7 @@ things are dropped outright. Note which two apply to picked-up PRs only:
 |---|---|---|
 | `EXCLUDE_URLS` | all | Hand-maintained exact URLs at the top of `fetch.sh`. Permanent. |
 | Drafts | all | A draft is not asking to be reviewed yet. |
+| `MUTED_URLS` | picked-up only | "I have said my piece." Unlike `EXCLUDE_URLS`, a real review request still brings it back — remove the line to unmute. |
 | **PRs I already approved** | picked-up only | My review is in. If the author wants another pass they re-request me, and that arrives through the *direct* search, which this rule does not touch. |
 | **Older than `PICKED_MAX_AGE_DAYS`** (30) | picked-up only | Otherwise `reviewed-by:@me` dredges up spec PRs commented on in 2017. |
 

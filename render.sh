@@ -297,6 +297,7 @@ function hiddenNote(){
   if (h.approved) bits.push(h.approved + ' already approved');
   if (h.aged)     bits.push(h.aged + ' untouched for ' + (h.agedDays || 30) + '+ days');
   if (h.drafts)   bits.push(h.drafts + ' draft');
+  if (h.muted)    bits.push(h.muted + ' muted');
   if (!bits.length) return '';
   return '<div class="queue-note">' + bits.join(' · ') + ' hidden. ' +
     'A re-requested review always comes back.</div>';
