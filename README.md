@@ -53,25 +53,39 @@ things are dropped outright. Note which two apply to picked-up PRs only:
 |---|---|---|
 | `EXCLUDE_URLS` | all | Hand-maintained exact URLs at the top of `fetch.sh`. Permanent. |
 | Drafts | all | A draft is not asking to be reviewed yet. |
-| `MUTED_URLS` | picked-up only | "I have said my piece." Unlike `EXCLUDE_URLS`, a real review request still brings it back — remove the line to unmute. |
-| **PRs I already approved** | picked-up only | My review is in. If the author wants another pass they re-request me, and that arrives through the *direct* search, which this rule does not touch. |
+| `MUTED_URLS` | picked-up only | A draft review I will never finish — the one row the reviewed rule below cannot reach. Unlike `EXCLUDE_URLS`, a real review request still brings it back; remove the line to unmute. |
+| **PRs I already reviewed** | picked-up only | Any submitted state — approved, commented, changes requested. Submitting a review is what finishing one looks like; if the author wants another pass they re-request me, and that arrives through the *direct* search, which this rule does not touch. |
 | **Older than `PICKED_MAX_AGE_DAYS`** (30) | picked-up only | Otherwise `reviewed-by:@me` dredges up spec PRs commented on in 2017. |
 
 My own PRs are dropped from all three sources too — `reviewed-by:@me` matches a
 comment on my own PR, and a team request lands on me when I open a PR against a
 team I am in. They belong in the right-hand column, not the queue.
 
-The approved and age rules are scoped to the picked-up list on purpose. A direct
+What that leaves in the picked-up list is the case the `reviewed-by:@me` search
+exists for: **a review I started and never submitted** (GitHub state `PENDING`).
+Nobody routed that PR to me, so nothing will route it back — losing a
+half-written review is the one failure this source prevents. Everything else it
+returns is finished work, and finished work is not a queue.
+
+The reviewed and age rules are scoped to the picked-up list on purpose. A direct
 or team request is a live ask from a person: it is never hidden for being old,
-and never for being approved, because **a re-request is exactly how someone says
-"look again"**.
+and never for having been reviewed, because **a re-request is exactly how
+someone says "look again"**.
+
+Two rules were considered and rejected for this, both on real data:
+
+- *Hide only what I approved.* Leaves every PR I commented on or sent back
+  sitting in the queue with nothing for me to do on it.
+- *Bring it back when someone responds after my review.* Sounds right, fails in
+  practice: `ultra#18392` had a reply two days after my comment and would have
+  stayed visible, which is precisely the row that prompted the rule.
 
 Everything else is still **badged rather than filtered** — archived repos and
 PRs sitting with the author stay in the list, because those are judgment calls
 rather than answered questions.
 
 A one-line receipt under the queue header says how many rows each rule removed
-(`54 already approved · 3 untouched for 30+ days hidden`), and the same line goes
+(`61 already reviewed · 1 muted hidden`), and the same line goes
 to `watch.log`. A count, never a list: it proves the filter is working without
 re-introducing what it removed. A queue whose length nobody can account for is
 how this went wrong in the first place.

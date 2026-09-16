@@ -47,7 +47,10 @@ EXCLUDE_URLS=(
 # "never, under any circumstances"; this is "not unless someone asks me".
 # Remove a line to unmute.
 MUTED_URLS=(
-  # Commented, neither approved nor requested changes, nothing left for me to do.
+  # Kept as a worked example; rule 3 below now hides this one anyway, since any
+  # submitted review takes a picked-up PR off the queue. What this list is still
+  # for is the row rule 3 cannot reach: a draft review I started and will never
+  # finish, which would otherwise sit in the queue forever.
   "https://github.com/blackboard-learn/learn/pull/9148"
 )
 
@@ -340,17 +343,25 @@ done
 #   2. drafts              a draft is not asking to be reviewed yet. (All sources.)
 #   2b. MUTED_URLS         picked-up only -- said my piece, do not need it back,
 #                          but a real review request still brings it in.
-#   3. I already approved  picked-up rows only. My review is in; if the author
-#                          wants another pass they re-request me, and that
-#                          arrives through the DIRECT search, which rule 3 does
-#                          not touch. This is what 54 of 63 rows were.
+#   3. I already reviewed picked-up rows only, and ANY submitted state counts --
+#                          approved, commented, changes requested. Submitting a
+#                          review is what finishing one looks like; the ball is
+#                          with the author from that moment. If they want me
+#                          back they request me, and that arrives through the
+#                          DIRECT search, which rule 3 does not touch.
 #   4. older than PICKED_MAX_AGE_DAYS   picked-up rows only.
+#
+# What rule 3 leaves behind is the case the reviewed-by search exists for: a
+# review I have STARTED and not submitted (state PENDING). Nobody routed that
+# PR to me, so nothing will route it back -- losing a half-written review is the
+# one failure this source is here to prevent. Everything else it returns is
+# finished work, and finished work is not a queue.
 #
 # Rules 3 and 4 are deliberately scoped to the reviewed-by list. A direct or
 # team request is a live ask from a person: it is never dropped for being old,
-# and never for being approved, because a re-request is exactly how someone
-# says "look again". Everything NOT listed above is still badged rather than
-# filtered -- archived repos and PRs sitting with the author stay visible.
+# and never for having been reviewed, because a re-request is exactly how
+# someone says "look again". Everything NOT listed above is still badged rather
+# than filtered -- archived repos and PRs sitting with the author stay visible.
 DROP_URLS="$(printf '%s\n' "${EXCLUDE_URLS[@]+"${EXCLUDE_URLS[@]}"}" \
   | jq -R 'select(length > 0)' | jq -s '.')"
 
@@ -383,14 +394,19 @@ HIDDEN_MUTED="$(jq --argjson m "$MUTE_URLS" \
 REVIEWED="$(jq --argjson m "$MUTE_URLS" \
   '[ .[] | select( .url as $u | $m | index($u) | not ) ]' <<<"$REVIEWED")"
 
-# Rules 3 and 4, plus the tallies the page reports. A row that is both approved
-# and ancient counts once, as approved: it is the more useful reason of the two.
+# Rules 3 and 4, plus the tallies the page reports. A row that is both reviewed
+# and ancient counts once, as reviewed: it is the more useful reason of the two.
+#
+# PENDING is an unsubmitted draft review; NONE means the search matched but the
+# reviews query came back empty, which should not happen. Both stay visible --
+# the failure mode to avoid here is hiding work I have not finished, so anything
+# this rule cannot positively identify as submitted gets shown.
 CUTOFF="$(date -u -v-"${PICKED_MAX_AGE_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ')"
-HIDDEN_APPROVED="$(jq '[ .[] | select(.myReviewState == "APPROVED") ] | length' <<<"$REVIEWED")"
-HIDDEN_AGED="$(jq --arg c "$CUTOFF" \
-  '[ .[] | select(.myReviewState != "APPROVED") | select(.updatedAt < $c) ] | length' <<<"$REVIEWED")"
-REVIEWED="$(jq --arg c "$CUTOFF" \
-  '[ .[] | select(.myReviewState != "APPROVED") | select(.updatedAt >= $c) ]' <<<"$REVIEWED")"
+unfinished() { jq '[ .[] | select(.myReviewState == "PENDING" or .myReviewState == "NONE") ]'; }
+HIDDEN_REVIEWED="$(jq '[ .[] | select(.myReviewState != "PENDING" and .myReviewState != "NONE") ] | length' <<<"$REVIEWED")"
+REVIEWED="$(unfinished <<<"$REVIEWED")"
+HIDDEN_AGED="$(jq --arg c "$CUTOFF" '[ .[] | select(.updatedAt < $c) ] | length' <<<"$REVIEWED")"
+REVIEWED="$(jq --arg c "$CUTOFF" '[ .[] | select(.updatedAt >= $c) ]' <<<"$REVIEWED")"
 
 # Rule 2. Counted on the de-duped union so a PR requested of me AND of my team
 # is one hidden draft, not two.
@@ -402,7 +418,7 @@ TEAMPRS="$(drop_drafts <<<"$TEAMPRS")"
 REVIEWED="$(drop_drafts <<<"$REVIEWED")"
 
 echo "[$(date '+%H:%M:%S')] [info] queue: $(jq -s 'add|unique_by(.url)|length' \
-  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED")) shown; hidden ${HIDDEN_APPROVED} approved, ${HIDDEN_AGED} aged out, ${HIDDEN_DRAFTS} draft, ${HIDDEN_MUTED} muted" >&2
+  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED")) shown; hidden ${HIDDEN_REVIEWED} already reviewed, ${HIDDEN_AGED} aged out, ${HIDDEN_DRAFTS} draft, ${HIDDEN_MUTED} muted" >&2
 
 # --- 2b. enrich review-queue PRs with triage badges --------------------------
 # Everything computed here is DISPLAY metadata — none of it removes a PR from the
@@ -491,7 +507,7 @@ FETCH_ERRORS="$(jq -n \
   --argjson failedQueries "$FAILED_QUERIES" \
   --argjson dropped "$AUTHORED_DROPPED" \
   --argjson hidMuted "$HIDDEN_MUTED" \
-  --argjson hidApproved "$HIDDEN_APPROVED" \
+  --argjson hidReviewed "$HIDDEN_REVIEWED" \
   --argjson hidAged "$HIDDEN_AGED" \
   --argjson hidDrafts "$HIDDEN_DRAFTS" \
   --argjson agedDays "$PICKED_MAX_AGE_DAYS" \
@@ -500,7 +516,7 @@ FETCH_ERRORS="$(jq -n \
     reviewed: $reviewed, reviewedStale: $reviewedStale,
     staleQueries: $staleQueries, failedQueries: $failedQueries,
     authoredDropped: $dropped,
-    hidden: {approved: $hidApproved, aged: $hidAged, drafts: $hidDrafts,
+    hidden: {reviewed: $hidReviewed, aged: $hidAged, drafts: $hidDrafts,
              muted: $hidMuted, agedDays: $agedDays}}')"
 
 jq -n \
