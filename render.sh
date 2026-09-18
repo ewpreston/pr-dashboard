@@ -304,8 +304,15 @@ function hiddenNote(){
     'A re-requested review always comes back.</div>';
 }
 function staleNote(what){
+  // The age matters now: an over-age cache is served rather than dropped, so
+  // this note is the only thing standing between you and treating an hours-old
+  // review request as current.
+  const a = Number(FE.staleAgeSec || 0);
+  const how = !a               ? 'it may be a few minutes behind'
+            : a < 5400         ? 'it is about ' + Math.round(a / 60) + ' minutes old'
+            :                    'it is about ' + Math.round(a / 3600) + ' hours old';
   return '<div class="fetch-note">Showing the last good copy of ' + what + ' — ' +
-    'that query was rate-limited this cycle, so it may be a few minutes behind.</div>';
+    'that query failed this cycle, so ' + how + '.</div>';
 }
 
 const mine = (D.authored||[]).map(p => ({
@@ -498,8 +505,9 @@ document.getElementById('meta').textContent =
   const mins = Math.round(ageSec / 60);
   const age = mins < 90 ? mins + ' minutes' : Math.round(mins / 60) + ' hours';
   const el = document.getElementById('stale-warn');
-  el.innerHTML = 'This data is <strong>' + age + ' old</strong> — the generator ' +
-    'has stopped updating it. Check the watcher: ' +
+  el.innerHTML = 'This data is <strong>' + age + ' old</strong>. The watcher ' +
+    'pauses while the Mac is idle or asleep, so this clears a few minutes after ' +
+    'you are back. If it does not: ' +
     '<code>launchctl list | grep pr-dashboard</code> and ' +
     '<code>tail ~/pr-dashboard/watch.log</code>';
   el.classList.add('show');

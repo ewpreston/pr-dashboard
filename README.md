@@ -165,8 +165,10 @@ needs (see the section below):
 | `SEARCH_DELAY` | 8s | gap between consecutive **search** calls, to stay under the secondary rate limit |
 | `GH_RETRIES` | 2 | attempts per `gh` call; only rate-limit failures are retried |
 | `RETRY_BACKOFF` | 5s | multiplied by attempt number, so attempt 2 waits 5s |
-| `CACHE_MAX_AGE` | 3600s | oldest last-good search result still considered usable |
+| `CACHE_MAX_AGE` | 3600s | oldest last-good search result still considered *current*; older ones are still served, flagged stale |
 | `EMPTY_CONFIRM` | 2 | consecutive empty results required before an empty query is believed |
+| `IDLE_SKIP` | 600s | HID idleness after which `watch.sh` stops fetching and lets the Mac sleep |
+| `IDLE_POLL` | 30s | how often it re-checks idleness while paused |
 
 Keep `CYCLE_TIMEOUT` below `INTERVAL` so a killed cycle still finishes before the
 next one starts. Timeouts are logged to `watch.log` as `[warn]`. With
@@ -179,6 +181,40 @@ the queue small matters to the cycle budget and not just to the eye. Adding a
 (`blackboard-foundations/pd-team-daffy`, purely by position) 403'd three cycles
 running. A query that fails *every* cycle never populates its cache, so it has no
 fallback either — pacing is what actually prevents that, not the cache.
+
+## Sleep (why the log has hour-long gaps, and why that's fine now)
+
+The Mac idle-sleeps after 15 minutes (`pmset -g | grep sleep`). Before this was
+handled, a 5-minute loop on a sleeping Mac only ran inside the 45-second DarkWake
+windows, so a ~156s cycle got torn across three or four of them. Everything
+downstream then failed in a way that looked like a GitHub problem:
+
+- `read: connection reset by peer` — the interface went down mid-call.
+- `timed out after 60s` — both watchdogs counted `sleep 1` iterations, which
+  freeze during sleep, so a call suspended for two hours woke with its full 60s
+  budget unspent and a dead socket to spend it on. Both now use wall-clock
+  deadlines (`date +%s`), so a torn call or cycle is killed on the next wake.
+- Queue sizes swinging 15 → 5 → 9 — `CACHE_MAX_AGE` is wall-clock, and at two
+  cycles an hour every cache ages out. An over-age cache used to be refused,
+  which silently removed real review requests from the queue.
+
+Three changes, in `watch.sh` unless noted:
+
+1. **Don't fetch while nobody is here.** Above `IDLE_SKIP` seconds of HID
+   idleness the loop polls every `IDLE_POLL` instead of fetching, so the Mac
+   sleeps normally. Touching the keyboard drops idle to zero and a cycle starts
+   within `IDLE_POLL`. Pause and resume are logged.
+2. **Don't tear a cycle in half.** A running cycle holds `caffeinate -i -w $pid`
+   — idle sleep only, so lid-close still sleeps — and the wait between cycles is
+   a wall-clock deadline, so if the Mac does sleep through it the next cycle
+   fires immediately on wake instead of finishing out a stale timer.
+3. **Serve an over-age cache rather than dropping it** (`fetch.sh`), counted as
+   stale, with `staleAgeSec` in the page's health blob so the note says *how*
+   old. An old review request labeled old is honest; one that vanishes is not.
+
+A `TERM` to `watch.sh` (including `launchctl kickstart -k`) now kills the running
+cycle's process group. It used to leave `fetch.sh` orphaned on PPID 1, writing
+`dashboard.html` and `.cache` underneath its own replacement.
 
 ## Search rate limiting (why "My open PRs" once went blank)
 
@@ -282,3 +318,9 @@ ps -ax -o pid,etime,command | grep fetch.sh # a cycle older than CYCLE_TIMEOUT i
 A `fetch.sh` or `gh` process with a multi-hour `ELAPSED` is the tell. That should
 no longer happen, but if it does: unload + load the agent, then check whether the
 timeouts fired in the log.
+
+Hour-long gaps between `fetching...` lines are **not** a fault on their own — the
+loop pauses while the Mac is idle or asleep (see [Sleep](#sleep-why-the-log-has-hour-long-gaps-and-why-thats-fine-now)).
+Look for the `[info] idle for …; pausing` / `[info] resuming after …` pair
+bracketing the gap. A gap with no `pausing` line, or one that outlives your
+sitting back down by more than a couple of minutes, is a real problem.

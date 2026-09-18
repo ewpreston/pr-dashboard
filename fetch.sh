@@ -12,7 +12,11 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${OUT:-$DIR/dashboard.html}"
 TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
+# Worst cache age served this cycle. A file, not a variable, because every query
+# runs inside `out="$(cached_search ...)"` -- a subshell, whose variable writes
+# are discarded (same trap documented on classify_query below).
+STALE_AGE_FILE="$(mktemp)"
+trap 'rm -f "$TMP" "$STALE_AGE_FILE"' EXIT
 
 # --- config ------------------------------------------------------------------
 # Teams I'm on, used for the team-review-requested query. Regenerate with:
@@ -84,11 +88,23 @@ RETRY_BACKOFF="${RETRY_BACKOFF:-5}"
 
 # Last-good cache. Each search's result is kept on disk, so a query that 403s
 # this cycle reuses its previous result instead of blanking a whole section.
-# Entries older than CACHE_MAX_AGE are refused: showing hour-old review requests
-# as current would be its own kind of lie.
+# Entries older than CACHE_MAX_AGE are still served, but counted as stale so the
+# page can say how old they are. They used to be refused outright, which silently
+# dropped real review requests off the queue every time the Mac slept long enough
+# for the caches to age out. An old request labeled old is honest; one that
+# vanishes is not.
 CACHE_DIR="${CACHE_DIR:-$DIR/.cache}"
 CACHE_MAX_AGE="${CACHE_MAX_AGE:-3600}"
 mkdir -p "$CACHE_DIR"
+
+# note_stale_age <seconds> -- remembers the oldest cache this cycle had to serve,
+# for the "showing the last good copy" note on the page.
+note_stale_age() {
+  local cur
+  cur="$(cat "$STALE_AGE_FILE" 2>/dev/null || echo 0)"
+  case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
+  if [ "$1" -gt "$cur" ]; then printf '%s' "$1" >"$STALE_AGE_FILE"; fi
+}
 
 # How many consecutive empty results it takes to believe a query is really empty.
 # Observed: the direct-review search returned `[]` with HTTP 200 during one cycle
@@ -102,15 +118,17 @@ EMPTY_CONFIRM="${EMPTY_CONFIRM:-2}"
 # timeout/failure so one bad call degrades the dashboard instead of hanging it.
 gh_json() {
   local fallback="$1"; shift
-  local out err rc attempt=1 backoff pid waited
+  local out err rc attempt=1 backoff pid deadline
   while : ; do
     out="$(mktemp)"; err="$(mktemp)"
     gh "$@" >"$out" 2>"$err" &
     pid=$!
-    waited=0
-    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$GH_TIMEOUT" ]; do
+    # Wall clock, not a count of `sleep 1` iterations: the counter freezes while
+    # the Mac is asleep, so a call suspended across a two-hour sleep used to come
+    # back to a dead socket with its whole 60s budget still unspent.
+    deadline=$(( $(date +%s) + GH_TIMEOUT ))
+    while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
       sleep 1
-      waited=$((waited + 1))
     done
     if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" 2>/dev/null || true
@@ -187,10 +205,12 @@ cached_search() {
       age=$(( $(date +%s) - $(stat -f %m "$file") ))
       if [ "$age" -le "$CACHE_MAX_AGE" ]; then
         echo "[$(date '+%H:%M:%S')] [info] $key failed; reusing cached copy (${age}s old)" >&2
-        cat "$file"
-        return 1
+      else
+        echo "[$(date '+%H:%M:%S')] [warn] $key failed; serving its ${age}s-old cache (> ${CACHE_MAX_AGE}s) flagged stale" >&2
       fi
-      echo "[$(date '+%H:%M:%S')] [warn] $key failed and its cache is ${age}s old (> ${CACHE_MAX_AGE}s); dropping" >&2
+      note_stale_age "$age"
+      cat "$file"
+      return 1
     fi
     printf 'null'
     return 1
@@ -496,7 +516,10 @@ NOW="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 # Which queries degraded this cycle. The page needs this to avoid the failure
 # mode that started all of it: an empty column that reads as "nothing to do".
+STALE_AGE="$(cat "$STALE_AGE_FILE" 2>/dev/null || echo 0)"
+case "$STALE_AGE" in ''|*[!0-9]*) STALE_AGE=0 ;; esac
 FETCH_ERRORS="$(jq -n \
+  --argjson staleAge "$STALE_AGE" \
   --argjson authored "$AUTHORED_FAILED" \
   --argjson authoredStale "$AUTHORED_STALE" \
   --argjson direct "$DIRECT_FAILED" \
@@ -515,6 +538,7 @@ FETCH_ERRORS="$(jq -n \
     direct: $direct, directStale: $directStale,
     reviewed: $reviewed, reviewedStale: $reviewedStale,
     staleQueries: $staleQueries, failedQueries: $failedQueries,
+    staleAgeSec: $staleAge,
     authoredDropped: $dropped,
     hidden: {reviewed: $hidReviewed, aged: $hidAged, drafts: $hidDrafts,
              muted: $hidMuted, agedDays: $agedDays}}')"
@@ -543,5 +567,12 @@ jq -n \
    }' > "$TMP"
 
 # --- render HTML -------------------------------------------------------------
-DATA="$(cat "$TMP")" "$DIR/render.sh" > "$OUT"
+# Render to a sibling temp file and rename into place: `> "$OUT"` truncates on
+# open, so a cycle killed mid-render (CYCLE_TIMEOUT, or launchd restarting the
+# watcher) left the browser meta-refreshing onto half a page. rename(2) is atomic
+# within the directory, so a reader sees either the old page or the new one.
+OUT_TMP="$OUT.tmp.$$"
+trap 'rm -f "$TMP" "$STALE_AGE_FILE" "$OUT_TMP"' EXIT
+DATA="$(cat "$TMP")" "$DIR/render.sh" > "$OUT_TMP"
+mv "$OUT_TMP" "$OUT"
 echo "[$(date '+%H:%M:%S')] wrote $OUT" >&2
