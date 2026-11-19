@@ -39,10 +39,14 @@ file on each interval; the page's `<meta refresh>` reloads it, so it stays curre
   rail, a `N-PR stack` header naming the branch the whole stack lands on, and a
   `stack 2/5` badge per row. The bottom PR is badged **review first**; every other
   row says which PR it sits **on**. See "How stacking is worked out" below.
-- **Review button** on every row in both columns — copies
-  `/code-review medium <pr-url>` to the clipboard to paste into a Claude session.
-  Deliberately clipboard-only: a `file://` page can't run `claude`, and nothing
-  should post to someone else's PR unattended.
+- **Review button** on every row in both columns — copies a prompt to paste
+  into a Claude session: `Run /code-review high <pr-url>, then run
+  /post-draft-review to post the verified findings as a draft review.` It is
+  plain text, not a leading slash command, because anything after a leading
+  `/code-review` is passed to that skill as arguments, so a chained second
+  command wouldn't run. Deliberately clipboard-only: a `file://` page can't run
+  `claude`. The review it posts is a PENDING draft, which nobody else sees until
+  you submit it on GitHub, so nothing is published to someone else's PR unattended.
 
 ## What the queue hides
 
