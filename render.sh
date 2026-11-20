@@ -408,7 +408,7 @@ function wireReviewButtons(host){
 
 function reviewButton(url){
   return `<button class="review-btn" data-url="${esc(url)}"
-            title="Copy '${REVIEW_CMD.trim()} &lt;url&gt;' for Claude">Review</button>`;
+            title="Copy a /code-review high + /post-draft-review prompt for Claude">Review</button>`;
 }
 
 function reviewRow(p){
