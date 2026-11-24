@@ -336,6 +336,7 @@ revertable (`git log`, `git revert <sha>`). Commit before experimenting.
 - `.cache/` — last-good result per search (used when a query is rate-limited), the
   last payload for heartbeat re-renders, and the poll's ETag and seen marker.
 - `watch.sh` — the loop: polls, runs full cycles, heartbeats the page.
+- `launchd/com.ewpreston.pr-dashboard.plist` — the LaunchAgent, installed by copying.
 
 ## Background service (launchd) — installed
 
@@ -345,10 +346,21 @@ dies, and needs no open terminal. Just keep `dashboard.html` open in a browser t
 (bookmark the `file://` URL).
 
 Plist: `~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist`
+(tracked copy: `launchd/com.ewpreston.pr-dashboard.plist`)
 Logs:  `~/pr-dashboard/watch.log`
+
+The repo copy is the source of truth. It is copied, not symlinked, because
+launchd doesn't reliably load a symlinked agent. Edit the repo copy, then install
+it with the line below. The paths in it are absolute (`/Users/eric.preston/...`,
+`/opt/homebrew/bin/bash`), so change them on another machine.
 
 ### Manage it
 ```sh
+# install / update from the repo copy
+cp ~/pr-dashboard/launchd/com.ewpreston.pr-dashboard.plist ~/Library/LaunchAgents/
+launchctl unload ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist 2>/dev/null
+launchctl load   ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist
+
 # status (PID in col 1, last exit code in col 2)
 launchctl list | grep pr-dashboard
 
@@ -356,7 +368,7 @@ launchctl list | grep pr-dashboard
 launchctl unload ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist
 launchctl load   ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist
 
-# change cadence: edit POLL_INTERVAL / FULL_INTERVAL in the plist, then unload + load
+# change cadence: edit POLL_INTERVAL / FULL_INTERVAL in launchd/…plist, then install as above
 
 # uninstall completely
 launchctl unload ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist

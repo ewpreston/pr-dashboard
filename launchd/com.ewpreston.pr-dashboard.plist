@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ewpreston.pr-dashboard</string>
+
+  <!-- Run watch.sh (its own loop polls and regenerates). -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/bash</string>
+    <string>/Users/eric.preston/pr-dashboard/watch.sh</string>
+  </array>
+
+  <!-- launchd starts with a bare environment; give the scripts gh + jq. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Cheap notifications check; a full fetch runs on activity. -->
+    <key>POLL_INTERVAL</key>
+    <string>60</string>
+    <!-- Backstop full fetch for changes that raise no notification. -->
+    <key>FULL_INTERVAL</key>
+    <string>600</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/eric.preston/pr-dashboard</string>
+
+  <!-- Start at login and keep it alive if it ever exits. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Logs for troubleshooting. -->
+  <key>StandardOutPath</key>
+  <string>/Users/eric.preston/pr-dashboard/watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/eric.preston/pr-dashboard/watch.log</string>
+</dict>
+</plist>
