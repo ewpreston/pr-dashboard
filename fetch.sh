@@ -277,7 +277,13 @@ search_reviewed_gql() {
         myReviewState:
           ( ( .reviews.nodes // [] | map(.state) ) as $st
             | if ($st | index("PENDING")) then "PENDING"
-              else ( $st | last // "NONE" ) end )
+              else ( $st | last // "NONE" ) end ),
+        # Approved = my latest VERDICT is APPROVED. COMMENTED is skipped because
+        # replying to a thread after approving files a COMMENTED review, which
+        # does not take the approval back; DISMISSED and CHANGES_REQUESTED do.
+        myApproved:
+          ( [ .reviews.nodes // [] | .[].state
+              | select(. != "COMMENTED" and . != "PENDING") ] | last == "APPROVED" )
       } ]' <<<"$raw" 2>/dev/null || printf 'null'
 }
 
@@ -403,6 +409,22 @@ drop_mine() { jq --arg me "$MY_LOGIN" '[ .[] | select(.author.login != $me) ]'; 
 DIRECT="$(drop_mine <<<"$DIRECT")"
 TEAMPRS="$(drop_mine <<<"$TEAMPRS")"
 REVIEWED="$(drop_mine <<<"$REVIEWED")"
+
+# Team requests I have already approved. A team request asks the TEAM, not me:
+# on learn#9996 the author re-requested pd-team-cpe-learn 26 minutes after I
+# approved, to get a second approver, and the PR sat in my queue for hours as a
+# "live ask" I had already answered. If someone wants ME to look again they
+# request me directly, and the direct search is untouched by this. Only an
+# approval counts (see myApproved): after a comment or changes-requested, a team
+# re-request may well be the author saying "fixed, look again".
+#
+# Read from the reviewed-by list BEFORE rule 3 filters it. If that search failed
+# this cycle the list is empty, nothing is dropped, and the rows stay visible --
+# the same fail-toward-showing rule as everywhere else here.
+# No tally of its own: every row dropped here is also in the reviewed-by list,
+# so it is already counted under "already reviewed".
+APPROVED_URLS="$(jq '[ .[] | select(.myApproved == true) | .url ]' <<<"$REVIEWED")"
+TEAMPRS="$(jq --argjson a "$APPROVED_URLS" '[ .[] | select( .url as $u | $a | index($u) | not ) ]' <<<"$TEAMPRS")"
 
 # Muted: hand-picked, picked-up rows only. Applied before the rules below so a
 # muted PR is reported as muted rather than swallowed by a broader reason -- the

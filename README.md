@@ -59,6 +59,7 @@ things are dropped outright. Note which two apply to picked-up PRs only:
 | Drafts | all | A draft is not asking to be reviewed yet. |
 | `MUTED_URLS` | picked-up only | A draft review I will never finish — the one row the reviewed rule below cannot reach. Unlike `EXCLUDE_URLS`, a real review request still brings it back; remove the line to unmute. |
 | **PRs I already reviewed** | picked-up only | Any submitted state — approved, commented, changes requested. Submitting a review is what finishing one looks like; if the author wants another pass they re-request me, and that arrives through the *direct* search, which this rule does not touch. |
+| **Team requests I already approved** | team only | A team request asks the team, not me. On learn#9996 the author re-requested the team after I approved, to get a second approver, and it sat in my queue for hours. Approval only (latest verdict, ignoring thread-reply COMMENTED reviews); after changes-requested a team re-request may mean "fixed, look again". A *direct* request is never dropped by this. |
 | **Older than `PICKED_MAX_AGE_DAYS`** (30) | picked-up only | Otherwise `reviewed-by:@me` dredges up spec PRs commented on in 2017. |
 
 My own PRs are dropped from all three sources too — `reviewed-by:@me` matches a
@@ -72,8 +73,8 @@ half-written review is the one failure this source prevents. Everything else it
 returns is finished work, and finished work is not a queue.
 
 The reviewed and age rules are scoped to the picked-up list on purpose. A direct
-or team request is a live ask from a person: it is never hidden for being old,
-and never for having been reviewed, because **a re-request is exactly how
+request is a live ask from a person: it is never hidden for being old, and never
+for having been reviewed (a team request is hidden only once I have approved), because **a re-request is exactly how
 someone says "look again"**.
 
 Two rules were considered and rejected for this, both on real data:
