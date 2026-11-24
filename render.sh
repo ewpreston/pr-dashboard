@@ -106,6 +106,11 @@ TEMPLATE="$(cat <<'HTML'
   .b-stack { background:var(--chip); color:var(--muted); }
   .b-first { color:#12d3c4; border:1px solid #12d3c4; }
   .b-blocked { background:var(--chip); color:var(--draft); }
+  /* Stack context (fetch.sh 3b): there so the stack reads whole, not because it
+     is waiting on me. Dimmed rather than hidden; hover brings it back to full. */
+  .b-ctx { background:var(--chip); color:var(--muted); font-style:italic; }
+  .pr.ctx { opacity:.6; }
+  .pr.ctx:hover { opacity:1; }
   .empty { color:var(--muted); font-style:italic; padding:6px 0; }
   /* A query that failed must never look like an empty result. Same slot as
      .empty, but styled as a problem rather than as "nothing to do". */
@@ -257,9 +262,13 @@ function stackAwareOrder(list, newestFirst){
   }
   const blocks = [...groups.values()];
   for (const g of blocks) g.sort((a,b) => (a.stackPos || 0) - (b.stackPos || 0));
-  const key = g => newestFirst
-    ? Math.max(...g.map(p => +new Date(p.updatedAt)))
-    : Math.min(...g.map(p => +new Date(p.updatedAt)));
+  // Context rows (fetch.sh 3b) ride along inside a block but never place it:
+  // only the PRs that are actually in this column's list decide where it sits.
+  const key = g => {
+    const own = g.filter(p => !p.context);
+    const ts = (own.length ? own : g).map(p => +new Date(p.updatedAt));
+    return newestFirst ? Math.max(...ts) : Math.min(...ts);
+  };
   blocks.sort((a,b) => newestFirst ? key(b) - key(a) : key(a) - key(b));
   return blocks.flat();
 }
@@ -323,9 +332,27 @@ const mine = (D.authored||[]).map(p => ({
   ci: ciRollup(p.statusCheckRollup)
 })).sort((a,b)=> new Date(b.updatedAt) - new Date(a.updatedAt));
 
-// Both columns at once -- see linkStacks. Runs after `mine` exists so a stack
-// spanning the two is linked rather than showing up as two unrelated fragments.
-linkStacks([review, mine]);
+// The rest of each stack (fetch.sh 3b): open PRs in a stack I am working on
+// that are neither waiting on me nor mine. Drawn inside their stack so it reads
+// whole and starts at its real bottom, but never counted as review work.
+const context = (D.stackContext||[]).map(p => ({
+  repo: p.repository.nameWithOwner, number: p.number, title: p.title,
+  author: p.author?.login, url: p.url, updatedAt: p.updatedAt, isDraft: p.isDraft,
+  head: p.headRefName, base: p.baseRefName, context: true
+}));
+
+// All three at once -- see linkStacks. Runs after `mine` exists so a stack
+// spanning the columns is linked rather than showing up as unrelated fragments.
+linkStacks([review, mine, context]);
+
+// Each context row joins the column its stack already lives in: the review
+// column when the stack has a queue PR, otherwise mine. A context row whose
+// stack is in neither (cannot happen today -- 3b only walks out from PRs on the
+// page) is dropped rather than shown as a stray.
+const reviewStacks = new Set(review.map(p => p.stackId).filter(Boolean));
+const mineStacks = new Set(mine.map(p => p.stackId).filter(Boolean));
+const contextReview = context.filter(p => reviewStacks.has(p.stackId));
+const contextMine = context.filter(p => !reviewStacks.has(p.stackId) && mineStacks.has(p.stackId));
 
 function stackBits(p){
   if (!(p.stackSize > 1)) return { cls:'', rail:'', badges:'' };
@@ -335,8 +362,13 @@ function stackBits(p){
     rail: d ? '<span class="rail" aria-hidden="true"></span>' : '',
     badges:
       `<span class="badge b-stack">stack ${p.stackPos}/${p.stackSize}</span>` +
-      (p.stackRoot
+      // "review first" only on a root I actually need to review. A context root
+      // (say, one I already approved) is still the bottom of the stack, but
+      // telling me to review it first would point at finished work.
+      (p.stackRoot && !p.context
         ? '<span class="badge b-first">review first</span>'
+        : p.stackRoot
+        ? '<span class="badge b-blocked">bottom</span>'
         : `<span class="badge b-blocked">on #${p.parent ? p.parent.number : '?'}</span>`)
   };
 }
@@ -414,7 +446,7 @@ function reviewButton(url){
 function reviewRow(p){
   const s = stackBits(p);
   return `
-      <div class="pr${s.cls}">
+      <div class="pr${s.cls}${p.context ? ' ctx' : ''}">
         <div class="pr-main">
           ${s.rail}
           <a href="${p.url}" target="_blank" rel="noopener">${esc(p.repo.split('/')[1])} #${p.number} — ${esc(p.title)}</a>
@@ -422,6 +454,7 @@ function reviewRow(p){
         </div>
         <div class="sub">
           <span>@${esc(p.author)}</span>
+          ${p.context ? '<span class="badge b-ctx" title="Not waiting on me: no review request, no pending draft of mine. Shown so the stack reads whole.">stack context</span>' : ''}
           ${p.unrouted ? '<span class="badge b-mine" title="No review request and no team of mine — it is here because I already reviewed it">picked up</span>' : ''}
           ${s.badges}
           ${p.isDraft ? '<span class="badge b-draft">DRAFT</span>' : ''}
@@ -472,8 +505,9 @@ function renderReview(){
   const stale    = FE.directStale || FE.reviewedStale || (FE.staleQueries || 0) > 0;
   const note = (degraded ? fetchErrNote('some review requests')
               : stale    ? staleNote('some review requests') : '') + hiddenNote();
+  // The count above stays review.length: context rows are not review work.
   host.innerHTML = note + (review.length
-    ? renderGroups(review)
+    ? renderGroups(review.concat(contextReview))
     : (degraded ? '' : '<div class="empty">Nothing waiting on you</div>'));
   wireReviewButtons(host);
 }
@@ -492,10 +526,12 @@ function renderMine(){
       ? '<div class="fetch-err">' + dropped + ' more of your PRs could not be loaded ' +
         'this cycle, so they are missing from this list.</div>'
       : '');
-  const g = groupByOrg(mine);
+  // Context rows here are someone else's PRs in a stack with mine, so they get
+  // the review-row layout (author, context badge) rather than my CI/decision row.
+  const g = groupByOrg(mine.concat(contextMine));
   host.innerHTML = partial + Object.keys(g).sort().map(org =>
     `<div class="org">${esc(org)}</div>` +
-    renderBlocks(stackAwareOrder(g[org], true), mineRow)).join('');
+    renderBlocks(stackAwareOrder(g[org], true), p => p.context ? reviewRow(p) : mineRow(p))).join('');
   wireReviewButtons(host);
 }
 
@@ -524,6 +560,8 @@ document.getElementById('foot').textContent =
   'Oldest-first. Hidden: drafts, picked-up PRs you have already reviewed, and team requests you approved — a ' +
   'picked-up row means a review you started and never submitted. Direct requests ' +
   'are never hidden. ' +
+  'Dimmed "stack context" rows are the rest of a stack you are on, shown so it reads ' +
+  'whole; they are not counted. ' +
   'Badges flag archived repos and PRs sitting with the author. Staleness is time since ' +
   'last update. Review copies a /code-review high + /post-draft-review prompt. Regenerated by pr-dashboard/fetch.sh.';
 

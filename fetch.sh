@@ -533,6 +533,82 @@ while IFS=$'\t' read -r repo num; do
   AUTHORED_FULL="$(jq --argjson p "$pr" '. + [$p]' <<<"$AUTHORED_FULL")"
 done < <(jq -r '.[] | "\(.repository.nameWithOwner)\t\(.number)"' <<<"$AUTHORED")
 
+# --- 3b. fill in the rest of each stack --------------------------------------
+# The queue only holds PRs that are waiting on me, so a stack I am reviewing
+# usually arrives in pieces: the PRs I hold a pending draft on show up, and the
+# ones nobody routed to me do not. The page can only link the pieces it has, so
+# a 9-PR stack used to render as a 3-PR one, starting somewhere in the middle.
+#
+# Fix: for every repo that holds a queue PR or one of mine, list its open PRs
+# once and walk parent/child links (A is B's parent when A's head branch is B's
+# base branch) outward from those PRs. Whatever the walk reaches that is not
+# already on the page is added as a CONTEXT row: drawn inside its stack, badged,
+# and never counted as review work. Context rows only complete stacks already on
+# the page; they never bring a PR into the queue on their own.
+#
+# Cost: one `gh pr list` (GraphQL, core budget, NOT search) per seed repo, about
+# 3s for Learn or ultra however long the stacks are, plus one `gh repo view` per
+# repo for its default branch. No search calls, so SEARCH_DELAY is untouched.
+#
+# Two guards against false stacks:
+#   - a PR whose head is the repo's default branch is never anyone's parent
+#     (a develop -> release PR would otherwise adopt every develop-based PR);
+#   - cross-repository (fork) PRs are ignored, since their head name is only
+#     unique within the fork.
+# The walk is also capped at STACK_FILL_MAX PRs per repo, so a pathological
+# branch layout costs a few extra rows at worst, not a runaway page.
+STACK_FILL_MAX="${STACK_FILL_MAX:-40}"
+STACK_SEEDS="$(jq -s '
+    ( .[0] + .[1] + .[2] | unique_by(.url) ) as $q |
+    .[3] as $meta |
+    [ $q[] | { repo: .repository.nameWithOwner, url,
+               headRefName: $meta[.url].headRefName, baseRefName: $meta[.url].baseRefName } ]
+    + [ .[4][] | { repo: .repoName, url, headRefName, baseRefName } ]
+    | map(select(.headRefName != null and .baseRefName != null))' \
+  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED") <(echo "$REVIEW_META") <(echo "$AUTHORED_FULL") \
+  || echo '[]')"
+KNOWN_URLS="$(jq -s '[ (.[0] + .[1] + .[2])[].url, .[3][].url ] + .[4] | unique' \
+  <(echo "$DIRECT") <(echo "$TEAMPRS") <(echo "$REVIEWED") <(echo "$AUTHORED_FULL") <(echo "$DROP_URLS") \
+  || echo '[]')"
+
+STACK_CONTEXT='[]'
+STACK_FILL_FAILED=0
+while IFS= read -r repo; do
+  [ -z "$repo" ] && continue
+  open="$(gh_json 'null' pr list --repo "$repo" --state open --limit 1000 \
+    --json number,title,url,author,updatedAt,isDraft,headRefName,baseRefName,isCrossRepository)"
+  default="$(gh_json '' repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name')"
+  if [ "$open" = "null" ] || [ -z "$open" ] || [ -z "$default" ]; then
+    # Degrade to the old behavior for this repo: its stacks show only the PRs
+    # already on the page. gh_json has already logged why.
+    STACK_FILL_FAILED=$((STACK_FILL_FAILED + 1))
+    continue
+  fi
+  found="$(jq -n --argjson open "$open" --argjson seeds "$STACK_SEEDS" --argjson known "$KNOWN_URLS" \
+    --arg repo "$repo" --arg default "$default" --argjson max "$STACK_FILL_MAX" '
+    [ $open[] | select(.isCrossRepository | not) ] as $o |
+    # Parent: an open PR whose head is my base. Children: open PRs based on my head.
+    def links($p):
+      [ $o[] | select( (.headRefName == $p.baseRefName and .headRefName != $default)
+                       or ($p.headRefName != $default and .baseRefName == $p.headRefName) ) ];
+    def grow:
+      . as $set
+      | ( $set + [ $set[] | links(.)[] ] | unique_by(.url) ) as $next
+      | if ($next | length) == ($set | length) or ($next | length) >= $max then $next
+        else $next | grow end;
+    [ $seeds[] | select(.repo == $repo) ]
+    | grow
+    | map( select( .url as $u | $known | index($u) | not ) )
+    | map( { repository: { nameWithOwner: $repo }, number, title, author, url,
+             updatedAt, isDraft, headRefName, baseRefName } )' \
+    || echo '[]')"
+  STACK_CONTEXT="$(jq -s '.[0] + .[1]' <(echo "$STACK_CONTEXT") <(echo "$found"))"
+done < <(jq -r '[ .[].repo ] | unique | .[]' <<<"$STACK_SEEDS")
+
+STACK_NOTE="$(jq 'length' <<<"$STACK_CONTEXT") context PR(s) filled in"
+[ "$STACK_FILL_FAILED" -gt 0 ] && STACK_NOTE="$STACK_NOTE; ${STACK_FILL_FAILED} repo(s) could not be listed"
+echo "[$(date '+%H:%M:%S')] [info] stacks: $STACK_NOTE" >&2
+
 # --- assemble one JSON payload for the HTML generator ------------------------
 NOW="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
@@ -571,6 +647,7 @@ jq -n \
   --argjson reviewed "$REVIEWED" \
   --argjson authored "$AUTHORED_FULL" \
   --argjson reviewMeta "$REVIEW_META" \
+  --argjson stackContext "$STACK_CONTEXT" \
   --argjson fetchErrors "$FETCH_ERRORS" \
   --arg me "$MY_LOGIN" \
   --arg now "$NOW" \
@@ -584,6 +661,8 @@ jq -n \
      reviewDirect: ($direct | map(select(.author.login != $me))),
      reviewReviewed: ($reviewed | map(select(.author.login != $me))),
      reviewMeta: $reviewMeta,
+     # Section 3b: the rest of each stack, for display inside it. Never review work.
+     stackContext: $stackContext,
      authored: $authored,
      fetchErrors: $fetchErrors
    }' > "$TMP"

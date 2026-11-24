@@ -132,6 +132,20 @@ Three things worth knowing:
   its tip would let it jump the queue every time someone pushed to the top PR,
   which is the opposite of what oldest-first is for. Order *within* a stack is
   always bottom-up, in both columns.
+- **Stacks are filled in.** The queue only holds PRs waiting on me, so a stack I
+  am reviewing used to arrive in pieces: the PRs I hold a pending draft on, but not
+  the ones nobody routed to me. A 9-PR stack showed as 3, starting mid-way. Now
+  `fetch.sh` (section 3b) lists the open PRs of each repo on the page once, walks
+  parent/child links out from the PRs already shown, and adds whatever it reaches
+  as dimmed **stack context** rows inside the block. They are not counted, never
+  place the block, and never get "review first" (a context bottom PR is badged
+  `bottom`). They only complete stacks already on the page: once every PR I am on
+  is reviewed and submitted, the whole stack leaves the queue together.
+  Cost: one `gh pr list` + one `gh repo view` per repo (core API, not search; ~3s
+  for Learn or ultra), so a cycle went from ~156s to ~159s. Guards: a PR whose head
+  is the repo's default branch is never a parent, fork PRs are ignored, and the
+  walk stops at `STACK_FILL_MAX` (40) PRs per repo. A repo whose listing fails
+  falls back to showing only the PRs already on the page, and the log says so.
 
 Limitations, all deliberate:
 
