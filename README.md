@@ -13,7 +13,7 @@ GitHub orgs, plus your own open PRs with review + CI status.
 # one-off snapshot
 ./fetch.sh && open dashboard.html
 
-# live: regenerate every 5 min while the tab stays open (meta-refresh reloads it)
+# live: regenerate 60s after each cycle ends while the tab stays open (meta-refresh reloads it)
 ./watch.sh
 # or a tighter loop:
 INTERVAL=120 ./watch.sh
@@ -162,7 +162,8 @@ Limitations, all deliberate:
 Staleness badge colors: green ≤2 days, amber ≤7 days, red older (time since last
 update).
 
-- **Stale-data banner** — if the data is older than 3 refresh intervals, a red
+- **Stale-data banner** — if the data is older than `STALE_AFTER` (3 intervals plus
+  `CYCLE_TIMEOUT`, so 420s at the default 60s), a red
   banner appears at the top saying so. The page meta-refreshes whether or not the
   generator is still alive, so without this a wedged watcher just serves old data
   that looks current.
@@ -189,8 +190,8 @@ needs (see the section below):
 | `IDLE_SKIP` | 600s | HID idleness after which `watch.sh` stops fetching and lets the Mac sleep |
 | `IDLE_POLL` | 30s | how often it re-checks idleness while paused |
 
-Keep `CYCLE_TIMEOUT` below `INTERVAL` so a killed cycle still finishes before the
-next one starts. Timeouts are logged to `watch.log` as `[warn]`. With
+`INTERVAL` is the gap after a cycle *ends*, so cycles never overlap and
+`CYCLE_TIMEOUT` may exceed it; a refresh lands every `INTERVAL` + cycle time. Timeouts are logged to `watch.log` as `[warn]`. With
 `SEARCH_DELAY` at 8s a healthy cycle takes roughly 156s — 13 searches is ~104s
 of pure pacing, and the rest is the per-PR enrichment loop, which is why keeping
 the queue small matters to the cycle budget and not just to the eye. Adding a
@@ -300,7 +301,7 @@ revertable (`git log`, `git revert <sha>`). Commit before experimenting.
 ## Background service (launchd) — installed
 
 A LaunchAgent runs `watch.sh` headless: it starts at login, regenerates every
-5 min, restarts itself if it dies, and needs no open terminal. Just keep
+~3.5 min (a ~156s cycle, then a 60s gap), restarts itself if it dies, and needs no open terminal. Just keep
 `dashboard.html` open in a browser tab (bookmark the `file://` URL).
 
 Plist: `~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist`

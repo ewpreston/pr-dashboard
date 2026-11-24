@@ -4,11 +4,11 @@
 # Regenerates dashboard.html on an interval so the open page stays live.
 # The HTML meta-refreshes on the same interval, so the browser reloads it.
 #
-# Usage:  ./watch.sh            # default 300s interval
+# Usage:  ./watch.sh            # default 60s between cycles
 #         INTERVAL=120 ./watch.sh
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INTERVAL="${INTERVAL:-300}"
+INTERVAL="${INTERVAL:-60}"
 export REFRESH="$INTERVAL"
 
 # Whole-cycle ceiling. fetch.sh caps each individual gh call, but it makes one
@@ -17,6 +17,12 @@ export REFRESH="$INTERVAL"
 # (No `setsid` on macOS — bash's own job control gives us the process group:
 # run fetch.sh in a monitored subshell so `kill -PGID` reaches its gh children.)
 CYCLE_TIMEOUT="${CYCLE_TIMEOUT:-240}"
+
+# The page warns when its data is older than this. INTERVAL is the gap AFTER a
+# cycle ends, so one refresh takes INTERVAL plus a ~156s fetch; 3 intervals alone
+# (180s at 60s) is shorter than a single healthy cycle and would always fire.
+# Allow 3 gaps plus one full cycle cap, so a missed or slow cycle stays quiet.
+export STALE_AFTER="${STALE_AFTER:-$(( INTERVAL * 3 + CYCLE_TIMEOUT ))}"
 
 # Idle handling. The Mac idle-sleeps after 15 minutes (`pmset -g | grep sleep`),
 # and a cycle that starts in one of the 45-second DarkWake windows gets torn in
