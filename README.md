@@ -13,14 +13,46 @@ GitHub orgs, plus your own open PRs with review + CI status.
 # one-off snapshot
 ./fetch.sh && open dashboard.html
 
-# live: regenerate 60s after each cycle ends while the tab stays open (meta-refresh reloads it)
+# live: check notifications every 60s, full fetch on activity or every 10 min
 ./watch.sh
-# or a tighter loop:
-INTERVAL=120 ./watch.sh
+# or different cadences:
+POLL_INTERVAL=120 FULL_INTERVAL=1800 ./watch.sh
 ```
 
-Open `dashboard.html` in a browser and leave the tab up. `watch.sh` rewrites the
-file on each interval; the page's `<meta refresh>` reloads it, so it stays current.
+Open `dashboard.html` in a browser and leave the tab up. The page's
+`<meta refresh>` reloads it every `POLL_INTERVAL`, so it stays current.
+
+### How it stays current (notifications-driven, like Alex's dashboard)
+
+Modeled on the notifications poller in
+[blackboard-learn/varju-github-dashboard](https://github.com/blackboard-learn/varju-github-dashboard).
+A full `fetch.sh` cycle costs ~156s and 13 paced searches, too much to run every
+minute. So `watch.sh` splits the work:
+
+1. **Every `POLL_INTERVAL` (60s)** — `poll.sh` makes one conditional
+   `GET /notifications` with the last response's ETag as `If-None-Match`. Nothing
+   new comes back as `304 Not Modified`, which does not count against the rate
+   limit. GitHub's `X-Poll-Interval` is honored if it ever asks for longer.
+   (`If-Modified-Since` does not work on this endpoint, measured: it always gets
+   200. The ETag is what makes it cheap.)
+2. **On activity** — any PR notification thread updated since the last check
+   (review requested, mention, comment, author, assign...) starts a full cycle
+   right away. The log line says which: `full fetch: activity: 2 blackboard-learn/learn#9949 (mention), …`.
+3. **Every `FULL_INTERVAL` (600s) regardless** — the backstop for changes that
+   raise no notification: CI finishing on my PRs, a teammate approving a team
+   request so it leaves the queue, a muted thread.
+4. **Startup and resume from idle** — always a full cycle.
+
+Every pass polls first, even when a full cycle is coming anyway. That moves the
+"seen" marker up to now, so activity the cycle is about to pick up doesn't trigger
+a second cycle straight after.
+
+A quiet poll re-renders the page from the last cycle's payload
+(`.cache/last-data.json`) with a new **checked** time, without calling GitHub. That
+heartbeat is what the stale banner reads, because the **generated** time can
+legitimately be up to ~10 minutes old now. A failed poll does *not* heartbeat, so a
+long VPN drop shows up as a stale page. Poll state lives in `.cache/notif.etag`
+and `.cache/notif.since`; delete both to re-baseline.
 
 ## What it shows
 - **Needs my review** — PRs where I'm a directly-requested reviewer, *or* a team
@@ -162,11 +194,12 @@ Limitations, all deliberate:
 Staleness badge colors: green ≤2 days, amber ≤7 days, red older (time since last
 update).
 
-- **Stale-data banner** — if the data is older than `STALE_AFTER` (3 intervals plus
-  `CYCLE_TIMEOUT`, so 420s at the default 60s), a red
-  banner appears at the top saying so. The page meta-refreshes whether or not the
-  generator is still alive, so without this a wedged watcher just serves old data
-  that looks current.
+- **Stale-data banner** — if nothing has successfully checked GitHub for
+  `STALE_AFTER` (3 polls plus `CYCLE_TIMEOUT`, so 420s by default), a red banner
+  appears at the top saying so. It reads the heartbeat's *checked* time, not the
+  *generated* time (see [How it stays current](#how-it-stays-current-notifications-driven-like-alexs-dashboard)).
+  The page meta-refreshes whether or not the generator is still alive, so without
+  this a wedged watcher just serves old data that looks current.
 
 ## Timeouts (why the watcher can't wedge any more)
 
@@ -189,9 +222,13 @@ needs (see the section below):
 | `EMPTY_CONFIRM` | 2 | consecutive empty results required before an empty query is believed |
 | `IDLE_SKIP` | 600s | HID idleness after which `watch.sh` stops fetching and lets the Mac sleep |
 | `IDLE_POLL` | 30s | how often it re-checks idleness while paused |
+| `POLL_INTERVAL` | 60s | gap between notifications checks (`watch.sh`); `INTERVAL` is the old name, still honored |
+| `FULL_INTERVAL` | 600s | longest gap between full cycles when no notification arrives |
+| `POLL_TIMEOUT` | 30s | the notifications check (`poll.sh`); a timeout counts as a failed check |
 
-`INTERVAL` is the gap after a cycle *ends*, so cycles never overlap and
-`CYCLE_TIMEOUT` may exceed it; a refresh lands every `INTERVAL` + cycle time. Timeouts are logged to `watch.log` as `[warn]`. With
+The loop is sequential, so a poll never overlaps a cycle and `CYCLE_TIMEOUT` may
+exceed `POLL_INTERVAL`. Failed checks are logged on the first failure and every
+10th after that. Timeouts are logged to `watch.log` as `[warn]`. With
 `SEARCH_DELAY` at 8s a healthy cycle takes roughly 156s — 13 searches is ~104s
 of pure pacing, and the rest is the per-PR enrichment loop, which is why keeping
 the queue small matters to the cycle budget and not just to the eye. Adding a
@@ -295,14 +332,17 @@ revertable (`git log`, `git revert <sha>`). Commit before experimenting.
   when your team memberships change:
   `gh api user/teams --jq '.[] | "\(.organization.login)/\(.slug)"'`
 - `render.sh` — turns the fetched JSON into HTML (called by `fetch.sh`).
-- `.cache/` — last-good result per search, used when a query is rate-limited.
-- `watch.sh` — regenerates on an interval.
+- `poll.sh` — one cheap notifications check; prints `quiet`/`baseline`/`fresh`/`error`.
+- `.cache/` — last-good result per search (used when a query is rate-limited), the
+  last payload for heartbeat re-renders, and the poll's ETag and seen marker.
+- `watch.sh` — the loop: polls, runs full cycles, heartbeats the page.
 
 ## Background service (launchd) — installed
 
-A LaunchAgent runs `watch.sh` headless: it starts at login, regenerates every
-~3.5 min (a ~156s cycle, then a 60s gap), restarts itself if it dies, and needs no open terminal. Just keep
-`dashboard.html` open in a browser tab (bookmark the `file://` URL).
+A LaunchAgent runs `watch.sh` headless: it starts at login, checks notifications
+every 60s, runs a full fetch on activity or every 10 min, restarts itself if it
+dies, and needs no open terminal. Just keep `dashboard.html` open in a browser tab
+(bookmark the `file://` URL).
 
 Plist: `~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist`
 Logs:  `~/pr-dashboard/watch.log`
@@ -316,7 +356,7 @@ launchctl list | grep pr-dashboard
 launchctl unload ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist
 launchctl load   ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist
 
-# change interval: edit INTERVAL in the plist, then unload + load
+# change cadence: edit POLL_INTERVAL / FULL_INTERVAL in the plist, then unload + load
 
 # uninstall completely
 launchctl unload ~/Library/LaunchAgents/com.ewpreston.pr-dashboard.plist
@@ -339,7 +379,8 @@ A `fetch.sh` or `gh` process with a multi-hour `ELAPSED` is the tell. That shoul
 no longer happen, but if it does: unload + load the agent, then check whether the
 timeouts fired in the log.
 
-Hour-long gaps between `fetching...` lines are **not** a fault on their own — the
+Gaps of up to `FULL_INTERVAL` between `fetching...` lines are normal: quiet polls
+don't log. Hour-long gaps are **not** a fault on their own either — the
 loop pauses while the Mac is idle or asleep (see [Sleep](#sleep-why-the-log-has-hour-long-gaps-and-why-thats-fine-now)).
 Look for the `[info] idle for …; pausing` / `[info] resuming after …` pair
 bracketing the gap. A gap with no `pausing` line, or one that outlives your

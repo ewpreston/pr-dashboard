@@ -676,4 +676,9 @@ OUT_TMP="$OUT.tmp.$$"
 trap 'rm -f "$TMP" "$STALE_AGE_FILE" "$OUT_TMP"' EXIT
 DATA="$(cat "$TMP")" "$DIR/render.sh" > "$OUT_TMP"
 mv "$OUT_TMP" "$OUT"
+# Keep the payload behind the page, so watch.sh can re-render between full
+# cycles with a fresh "last checked" time (the heartbeat the stale banner reads)
+# without fetching anything. Written only after a good render.
+cp "$TMP" "$CACHE_DIR/last-data.json.tmp.$$"
+mv "$CACHE_DIR/last-data.json.tmp.$$" "$CACHE_DIR/last-data.json"
 echo "[$(date '+%H:%M:%S')] wrote $OUT" >&2

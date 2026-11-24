@@ -6,12 +6,15 @@
 # fetch.sh regenerates the file, the browser picks it up automatically.
 #
 # Implementation note: the template is a QUOTED heredoc so the shell leaves the
-# JS template literals (${...}) untouched. The three real values we inject
-# (__REFRESH__, __STALE_AFTER__, __DATA__) are placeholders swapped in afterward.
+# JS template literals (${...}) untouched. The real values we inject
+# (__REFRESH__, __STALE_AFTER__, __CHECKED_AT__, __DATA__) are placeholders swapped in afterward.
 set -euo pipefail
 
 REFRESH="${REFRESH:-60}"    # seconds; must match the watcher interval
 STALE_AFTER="${STALE_AFTER:-$(( REFRESH * 3 + 240 ))}"  # set by watch.sh
+# Epoch ms of the last successful check for activity (watch.sh's heartbeat
+# re-render). Empty means "same as generatedAt", i.e. a fresh full fetch.
+CHECKED_AT="${CHECKED_AT:-}"
 DATA="${DATA:?render.sh expects the DATA env var}"
 
 TEMPLATE="$(cat <<'HTML'
@@ -536,21 +539,27 @@ function renderMine(){
   wireReviewButtons(host);
 }
 
+// Last time the watcher checked GitHub for activity. Between full fetches the
+// data is only re-fetched when a notification says something moved, so the
+// generated time can legitimately be ~10 minutes old; the check time cannot.
+const checked = new Date(Number('__CHECKED_AT__') || now.getTime());
 document.getElementById('meta').textContent =
-  'as ' + D.me + ' · generated ' + now.toLocaleString() + ' · auto-refreshes every __REFRESH__s';
+  'as ' + D.me + ' · generated ' + now.toLocaleTimeString() +
+  ' · checked ' + checked.toLocaleTimeString() + ' · checks every __REFRESH__s';
 
 // Staleness banner. The page meta-refreshes regardless of whether the generator
-// is still alive, so without this a wedged fetch.sh just serves days-old data
-// that looks entirely current. Threshold = STALE_AFTER (3 gaps plus a cycle cap,
-// from watch.sh), so a single missed or slow cycle doesn't cry wolf.
+// is still alive, so without this a wedged watcher just serves old data that
+// looks entirely current. Keyed on the last check, not on generatedAt. Threshold
+// = STALE_AFTER (3 polls plus a cycle cap, from watch.sh), so a single missed
+// poll or a slow full fetch doesn't cry wolf.
 (function () {
   const staleAfterSec = Number('__STALE_AFTER__') || 420;
-  const ageSec = (Date.now() - now.getTime()) / 1000;
+  const ageSec = (Date.now() - checked.getTime()) / 1000;
   if (ageSec < staleAfterSec) return;
   const mins = Math.round(ageSec / 60);
   const age = mins < 90 ? mins + ' minutes' : Math.round(mins / 60) + ' hours';
   const el = document.getElementById('stale-warn');
-  el.innerHTML = 'This data is <strong>' + age + ' old</strong>. The watcher ' +
+  el.innerHTML = 'Nothing has checked GitHub for <strong>' + age + '</strong>. The watcher ' +
     'pauses while the Mac is idle or asleep, so this clears a few minutes after ' +
     'you are back. If it does not: ' +
     '<code>launchctl list | grep pr-dashboard</code> and ' +
@@ -579,6 +588,7 @@ HTML
 # between — avoids sed/awk escaping and multi-line-variable pitfalls.
 RENDERED="${TEMPLATE//__REFRESH__/$REFRESH}"
 RENDERED="${RENDERED//__STALE_AFTER__/$STALE_AFTER}"
+RENDERED="${RENDERED//__CHECKED_AT__/$CHECKED_AT}"
 printf '%s\n' "${RENDERED%%__DATA__*}"
 printf '%s\n' "$DATA"
 printf '%s\n' "${RENDERED#*__DATA__}"
